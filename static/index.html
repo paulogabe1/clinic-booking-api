@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clinic appointments</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172a3a; background: #f3f7f8; }
+    body { margin: 0; }
+    main { max-width: 760px; margin: 40px auto; padding: 0 20px; }
+    h1 { margin-bottom: 8px; }
+    .intro, .hint { color: #526574; }
+    .panel, .slot, #confirmation { background: white; border: 1px solid #dce5e8; border-radius: 12px; padding: 18px; }
+    .panel { margin: 24px 0; }
+    label { display: block; font-weight: 600; margin: 12px 0 6px; }
+    input { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #b8c8cf; border-radius: 7px; font: inherit; }
+    button { border: 0; border-radius: 7px; padding: 10px 14px; background: #126b65; color: white; font: inherit; font-weight: 650; cursor: pointer; }
+    button:disabled { background: #839498; cursor: not-allowed; }
+    .slots { display: grid; gap: 12px; margin-top: 16px; }
+    .slot { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    .slot p { margin: 4px 0; }
+    .muted, #message { color: #526574; }
+    #message { min-height: 1.5em; }
+    #confirmation { margin-top: 16px; border-color: #9ac9bc; background: #f3fbf7; }
+    @media (max-width: 540px) { .slot { align-items: flex-start; flex-direction: column; } main { margin-top: 24px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Book a clinic appointment</h1>
+    <p class="intro">Choose an available appointment time and enter your details to confirm it.</p>
+    <section class="panel" aria-labelledby="access-heading">
+      <h2 id="access-heading">API access</h2>
+      <label for="api-key">API key</label>
+      <input id="api-key" type="password" autocomplete="off" placeholder="Enter your API key">
+      <p class="hint">Your key is used for requests from this page and is not saved.</p>
+      <button id="load-slots" type="button">Show available slots</button>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section>
+      <h2>Available appointments</h2>
+      <div id="slots" class="slots"></div>
+    </section>
+    <section id="confirmation" hidden aria-live="polite"></section>
+  </main>
+  <script>
+    const keyInput = document.querySelector("#api-key");
+    const slotsContainer = document.querySelector("#slots");
+    const message = document.querySelector("#message");
+    const confirmation = document.querySelector("#confirmation");
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "X-API-Key": keyInput.value.trim(),
+          ...(options.body ? { "Content-Type": "application/json" } : {}),
+          ...options.headers
+        }
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+      return data;
+    }
+
+    function showError(error) {
+      message.textContent = error.message;
+    }
+
+    async function loadSlots() {
+      message.textContent = "Loading appointments…";
+      confirmation.hidden = true;
+      try {
+        const result = await api("/slots");
+        slotsContainer.replaceChildren();
+        const available = result.slots.filter(slot => slot.available);
+        if (!available.length) {
+          message.textContent = "There are no available appointments right now.";
+          return;
+        }
+        for (const slot of available) {
+          const card = document.createElement("article");
+          card.className = "slot";
+          const details = document.createElement("div");
+          const provider = document.createElement("strong");
+          provider.textContent = slot.provider;
+          const time = document.createElement("p");
+          time.textContent = new Date(slot.start).toLocaleString();
+          const duration = document.createElement("p");
+          duration.className = "muted";
+          duration.textContent = `${new Date(slot.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} – ${new Date(slot.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+          details.append(provider, time, duration);
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = "Book this slot";
+          button.addEventListener("click", () => bookSlot(slot, button));
+          card.append(details, button);
+          slotsContainer.append(card);
+        }
+        message.textContent = `${available.length} appointment${available.length === 1 ? "" : "s"} available.`;
+      } catch (error) {
+        showError(error);
+      }
+    }
+
+    async function bookSlot(slot, button) {
+      const name = window.prompt("Your full name:");
+      if (name === null) return;
+      const email = window.prompt("Your email address:");
+      if (email === null) return;
+      button.disabled = true;
+      message.textContent = "Confirming your appointment…";
+      try {
+        const booking = await api("/bookings", {
+          method: "POST",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({ slot_id: slot.id, name, email })
+        });
+        confirmation.hidden = false;
+        confirmation.replaceChildren();
+        const heading = document.createElement("h2");
+        heading.textContent = "Appointment confirmed";
+        const summary = document.createElement("p");
+        summary.textContent = `${booking.name}, your appointment with ${slot.provider} is booked for ${new Date(slot.start).toLocaleString()}.`;
+        const id = document.createElement("p");
+        id.textContent = `Booking reference: ${booking.id}`;
+        confirmation.append(heading, summary, id);
+        message.textContent = "Your booking is confirmed.";
+        await loadSlots();
+        confirmation.hidden = false;
+      } catch (error) {
+        showError(error);
+        button.disabled = false;
+      }
+    }
+
+    document.querySelector("#load-slots").addEventListener("click", loadSlots);
+  </script>
+</body>
+</html>
