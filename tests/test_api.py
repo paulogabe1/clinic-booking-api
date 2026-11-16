@@ -61,6 +61,44 @@ class BookingApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(slot["available"] for slot in response.json()["slots"]))
 
+    def test_booking_validation_and_time_zone_ordering(self):
+        incomplete = self.client.post(
+            "/bookings", headers=self.headers, json={"slot_id": "slot-1"}
+        )
+        self.assertEqual(incomplete.status_code, 400)
+        invalid_email = self.client.post(
+            "/bookings",
+            headers=self.headers,
+            json={"slot_id": "slot-1", "name": "Ada", "email": "not-an-email"},
+        )
+        self.assertEqual(invalid_email.status_code, 400)
+
+        earlier = datetime(2030, 1, 1, 10, tzinfo=timezone(timedelta(hours=2)))
+        later = datetime(2030, 1, 1, 8, 30, tzinfo=timezone.utc)
+        response = self.client.post(
+            "/reset",
+            headers=self.headers,
+            json={
+                "slots": [
+                    {
+                        "id": "later",
+                        "provider": "Dr Ada",
+                        "start": later.isoformat(),
+                        "end": (later + timedelta(minutes=30)).isoformat(),
+                    },
+                    {
+                        "id": "earlier",
+                        "provider": "Dr Ada",
+                        "start": earlier.isoformat(),
+                        "end": (earlier + timedelta(minutes=30)).isoformat(),
+                    },
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        listed = self.client.get("/slots", headers=self.headers).json()["slots"]
+        self.assertEqual([slot["id"] for slot in listed], ["earlier", "later"])
+
     def test_idempotency_validation_and_cancellation(self):
         first = self.create(key="retry-1")
         repeated = self.create(key="retry-1")

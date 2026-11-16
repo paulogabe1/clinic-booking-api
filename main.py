@@ -213,7 +213,14 @@ async def reset(request: Request):
         if slot_id in seen_ids:
             return error("slot ids must be unique", 400)
         seen_ids.add(slot_id)
-        clean_slots.append((slot_id, provider, start.isoformat(), end.isoformat()))
+        clean_slots.append(
+            (
+                slot_id,
+                provider,
+                start.astimezone(timezone.utc).isoformat(),
+                end.astimezone(timezone.utc).isoformat(),
+            )
+        )
     with database() as connection:
         # Do the replacement as one unit so a partial reset cannot be left behind.
         connection.execute("BEGIN IMMEDIATE")
