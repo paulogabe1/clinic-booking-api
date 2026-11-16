@@ -6,6 +6,9 @@ booking.db
 .env.*
 !.env.example
 .agents/
+*bookmark*
+*script*
+settings.json
 .neon
 node_modules/
 package.json
