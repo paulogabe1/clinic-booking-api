@@ -21,8 +21,9 @@ Open `http://127.0.0.1:8000`, enter `local-development-key` for API access, and
 use `local-admin-key` if you choose to clear bookings. A few example
 appointments are added automatically.
 
-To cancel a booking from the page, enter its booking reference and the email
-used to make the booking. If they match, choose **Cancel this booking**.
+To cancel a booking from the page, enter the email used to make it under
+**My bookings**, then choose **Cancel** next to the booking. The confirmation
+after a new booking also has a cancel button.
 
 ## What the API does
 
@@ -45,8 +46,8 @@ uses it when it talks to the API.
   `X-Admin-Key` header. The website has a button for this action and asks for
   the admin key each time.
 
-The website's cancellation form looks up the booking by its reference and
-checks that the email matches before offering the cancel button.
+The website lists bookings for the entered email and offers cancellation for
+confirmed bookings. A new booking can also be cancelled from its confirmation.
 
 ## How it avoids common problems
 
