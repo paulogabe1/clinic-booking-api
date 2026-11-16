@@ -44,6 +44,7 @@ class BookingApiTests(unittest.TestCase):
             "/reset", headers=self.headers, json={"slots": self.slots}
         )
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"")
 
     def create(self, slot_id="slot-1", email="patient@example.com", key=None):
         headers = dict(self.headers)

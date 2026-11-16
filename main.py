@@ -19,7 +19,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, Request
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 #region 1. Database and service startup
 ROOT = Path(__file__).resolve().parent
@@ -233,7 +233,7 @@ async def reset(request: Request):
             clean_slots,
         )
         connection.execute("COMMIT")
-    return {"ok": True}
+    return Response(status_code=200)
 
 
 @app.post("/admin/clear-bookings")
