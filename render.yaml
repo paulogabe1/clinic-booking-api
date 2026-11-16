@@ -9,3 +9,5 @@ services:
     envVars:
       - key: API_KEY
         generateValue: true
+      - key: ADMIN_KEY
+        generateValue: true

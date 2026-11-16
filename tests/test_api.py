@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["API_KEY"] = "test-api-key"
+os.environ["ADMIN_KEY"] = "test-admin-key"
 database_directory = tempfile.TemporaryDirectory()
 os.environ["DATABASE_PATH"] = str(Path(database_directory.name) / "test.sqlite3")
 
@@ -85,6 +86,28 @@ class BookingApiTests(unittest.TestCase):
             statuses = list(executor.map(book, range(8)))
         self.assertEqual(statuses.count(201), 1)
         self.assertEqual(statuses.count(409), 7)
+
+    def test_admin_can_clear_bookings_without_removing_slots(self):
+        created = self.create()
+        self.assertEqual(created.status_code, 201)
+        endpoint = "/admin/clear-bookings"
+        self.assertEqual(
+            self.client.post(endpoint, headers=self.headers).status_code, 401
+        )
+
+        headers = {**self.headers, "X-Admin-Key": "test-admin-key"}
+        cleared = self.client.post(endpoint, headers=headers)
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.json(), {"ok": True, "message": "bookings cleared"})
+        self.assertEqual(
+            self.client.get(
+                f"/bookings/{created.json()['id']}", headers=self.headers
+            ).status_code,
+            404,
+        )
+        slots = self.client.get("/slots", headers=self.headers).json()["slots"]
+        self.assertEqual(len(slots), len(self.slots))
+        self.assertTrue(all(slot["available"] for slot in slots))
 
     def test_pagination_and_attempt_rate_limit(self):
         for index in range(3):

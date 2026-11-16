@@ -1,3 +1,9 @@
+"""A small clinic booking service.
+
+The web page and the API run together. The API checks a shared key, reads and
+writes booking data in SQLite, and protects a slot from being booked twice.
+"""
+
 import base64
 import hashlib
 import hmac
@@ -15,7 +21,7 @@ from fastapi import FastAPI, Header, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 
-
+#region 1. Database and service startup
 ROOT = Path(__file__).resolve().parent
 DATABASE_PATH = os.environ.get("DATABASE_PATH", str(ROOT / "booking.db"))
 STATIC_DIR = ROOT / "static"
@@ -25,6 +31,7 @@ app = FastAPI(title="Clinic Booking API", version="1.0.0")
 
 @contextmanager
 def database():
+    # Each request gets its own database connection, which is closed afterward.
     connection = sqlite3.connect(DATABASE_PATH, timeout=30, isolation_level=None)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -53,17 +60,20 @@ def initialize_database():
                 status TEXT NOT NULL CHECK (status IN ('confirmed', 'cancelled')),
                 created_at TEXT NOT NULL
             );
+            -- The database itself rejects a second active booking for a slot.
             CREATE UNIQUE INDEX IF NOT EXISTS one_confirmed_booking_per_slot
                 ON bookings(slot_id) WHERE status = 'confirmed';
             CREATE INDEX IF NOT EXISTS bookings_by_email_created
                 ON bookings(email, created_at, id);
             CREATE TABLE IF NOT EXISTS idempotency (
+                -- Save the result so a retry can receive the original answer.
                 key TEXT PRIMARY KEY,
                 request_hash TEXT NOT NULL,
                 response_status INTEGER NOT NULL,
                 response_body TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS rate_attempts (
+                -- Keep attempts, including failed ones, to limit rapid retries.
                 email TEXT NOT NULL,
                 attempted_at REAL NOT NULL
             );
@@ -101,11 +111,14 @@ def initialize_database():
 
 @app.on_event("startup")
 def startup():
+    # Refuse to start without a key, so the API cannot accidentally be left open.
     if not os.environ.get("API_KEY"):
         raise RuntimeError("API_KEY must be configured")
     initialize_database()
+#endregion
 
 
+#region 2. API key and error responses
 def error(message: str, status: int, headers: dict[str, str] | None = None):
     return JSONResponse({"error": message}, status_code=status, headers=headers)
 
@@ -119,6 +132,7 @@ def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    # Tell API tools that every API request needs the X-API-Key header.
     schema["components"]["securitySchemes"] = {
         "ApiKeyAuth": {
             "type": "apiKey",
@@ -136,12 +150,15 @@ app.openapi = custom_openapi
 
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
+    # Let people open the web page, but require the key for API routes.
     if request.url.path != "/" and not request.url.path.startswith("/static/"):
         if not api_key_valid(request.headers.get("X-API-Key")):
             return error("invalid or missing API key", 401)
     return await call_next(request)
+#endregion
 
 
+#region 3. Shared data helpers
 def parse_iso(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -163,8 +180,10 @@ def booking_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "status": row["status"],
         "created_at": row["created_at"],
     }
+#endregion
 
 
+#region 4. Web page and schedule setup
 @app.get("/")
 def home():
     return FileResponse(STATIC_DIR / "index.html")
@@ -172,6 +191,7 @@ def home():
 
 @app.post("/reset")
 async def reset(request: Request):
+    """Replace the whole schedule and clear bookings (use for setup or testing)."""
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -195,6 +215,7 @@ async def reset(request: Request):
         seen_ids.add(slot_id)
         clean_slots.append((slot_id, provider, start.isoformat(), end.isoformat()))
     with database() as connection:
+        # Do the replacement as one unit so a partial reset cannot be left behind.
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("DELETE FROM bookings")
         connection.execute("DELETE FROM slots")
@@ -208,8 +229,30 @@ async def reset(request: Request):
     return {"ok": True}
 
 
+@app.post("/admin/clear-bookings")
+def clear_bookings(
+    admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+):
+    """Clear bookings while leaving the appointment schedule in place."""
+    expected_admin_key = os.environ.get("ADMIN_KEY", "")
+    if not expected_admin_key or admin_key is None or not hmac.compare_digest(
+        admin_key, expected_admin_key
+    ):
+        return error("invalid or missing admin key", 401)
+    with database() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM bookings")
+        connection.execute("DELETE FROM idempotency")
+        connection.execute("DELETE FROM rate_attempts")
+        connection.execute("COMMIT")
+    return {"ok": True, "message": "bookings cleared"}
+#endregion
+
+
+#region 5. Show available appointments
 @app.get("/slots")
 def list_slots(provider: str | None = None):
+    """Show appointments in time order, with whether each can still be booked."""
     with database() as connection:
         rows = connection.execute(
             """
@@ -236,19 +279,24 @@ def list_slots(provider: str | None = None):
             for row in rows
         ]
     }
+#endregion
 
 
+#region 6. Helpers for safe retries and booking pages
 def canonical_hash(payload: Any) -> str:
+    # Make the same request look the same even if its JSON fields arrive in a new order.
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def cursor_encode(created_at: str, booking_id: str) -> str:
+    # Pack the last booking's date and reference into a token for the next page.
     raw = json.dumps([created_at, booking_id], separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def cursor_decode(cursor: str) -> tuple[str, str] | None:
+    # Unpack the token; if it cannot be read, the caller reports an invalid page link.
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         decoded = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
@@ -261,13 +309,16 @@ def cursor_decode(cursor: str) -> tuple[str, str] | None:
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
         pass
     return None
+#endregion
 
 
+#region 7. Create a booking safely
 @app.post("/bookings")
 async def create_booking(
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
+    """Book a slot; safely handle retries and limit rapid attempts by email."""
     try:
         payload = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -279,6 +330,7 @@ async def create_booking(
     now_epoch = datetime.now(timezone.utc).timestamp()
 
     with database() as connection:
+        # Finish one booking change before another starts, even if requests arrive together.
         connection.execute("BEGIN IMMEDIATE")
         if idempotency_key:
             previous = connection.execute(
@@ -286,6 +338,7 @@ async def create_booking(
                 (idempotency_key,),
             ).fetchone()
             if previous:
+                # Same key and same request? Return the saved answer, not a new booking.
                 if previous["request_hash"] != fingerprint:
                     connection.execute("COMMIT")
                     return error("idempotency key was already used with a different body", 422)
@@ -297,6 +350,7 @@ async def create_booking(
                 return response
 
         if normalized_email:
+            # Count this email's attempts from the last minute, even failed requests.
             cutoff = now_epoch - 60
             count = connection.execute(
                 "SELECT COUNT(*) FROM rate_attempts WHERE email = ? AND attempted_at > ?",
@@ -399,14 +453,17 @@ async def create_booking(
             )
         connection.execute("COMMIT")
     return JSONResponse(response_body, status_code=response_status)
+#endregion
 
 
+#region 8. Find, list, and cancel bookings
 @app.get("/bookings")
 def list_bookings(
     email: str | None = None,
     limit: str = "10",
     cursor: str | None = None,
 ):
+    """Show someone's bookings a page at a time; the next_cursor opens the next page."""
     if email is None:
         return error("email is required", 400)
     if not limit.isdigit() or not 1 <= int(limit) <= 50:
@@ -446,6 +503,7 @@ def list_bookings(
 
 @app.get("/bookings/{booking_id}")
 def get_booking(booking_id: str):
+    """Find one booking using its reference number."""
     with database() as connection:
         row = connection.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
     if row is None:
@@ -455,6 +513,7 @@ def get_booking(booking_id: str):
 
 @app.delete("/bookings/{booking_id}")
 def cancel_booking(booking_id: str):
+    """Cancel a booking so another patient can take its slot."""
     with database() as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
@@ -471,3 +530,4 @@ def cancel_booking(booking_id: str):
         cancelled["status"] = "cancelled"
         connection.execute("COMMIT")
     return booking_dict(cancelled)
+#endregion

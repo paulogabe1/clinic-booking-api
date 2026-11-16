@@ -16,6 +16,7 @@
     input { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #b8c8cf; border-radius: 7px; font: inherit; }
     button { border: 0; border-radius: 7px; padding: 10px 14px; background: #126b65; color: white; font: inherit; font-weight: 650; cursor: pointer; }
     button:disabled { background: #839498; cursor: not-allowed; }
+    button.danger { background: #9a3030; }
     .slots { display: grid; gap: 12px; margin-top: 16px; }
     .slot { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
     .slot p { margin: 4px 0; }
@@ -35,6 +36,7 @@
       <input id="api-key" type="password" autocomplete="off" placeholder="Enter your API key">
       <p class="hint">Your key is used for requests from this page and is not saved.</p>
       <button id="load-slots" type="button">Show available slots</button>
+      <button id="clear-bookings" class="danger" type="button">Clear all bookings</button>
       <p id="message" role="status" aria-live="polite"></p>
     </section>
     <section>
@@ -134,7 +136,33 @@
       }
     }
 
+    async function clearBookings() {
+      if (!window.confirm("Clear every booking? Appointment times will stay, but this cannot be undone.")) {
+        return;
+      }
+      const adminKey = window.prompt("Enter the admin key to clear bookings:");
+      if (adminKey === null || !adminKey.trim()) return;
+
+      const button = document.querySelector("#clear-bookings");
+      button.disabled = true;
+      message.textContent = "Clearing bookings…";
+      try {
+        await api("/admin/clear-bookings", {
+          method: "POST",
+          headers: { "X-Admin-Key": adminKey.trim() }
+        });
+        confirmation.hidden = true;
+        await loadSlots();
+        message.textContent = "All bookings have been cleared. Appointment times are unchanged.";
+      } catch (error) {
+        showError(error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     document.querySelector("#load-slots").addEventListener("click", loadSlots);
+    document.querySelector("#clear-bookings").addEventListener("click", clearBookings);
   </script>
 </body>
 </html>
