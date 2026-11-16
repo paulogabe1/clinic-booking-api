@@ -44,12 +44,34 @@
       <div id="slots" class="slots"></div>
     </section>
     <section id="confirmation" hidden aria-live="polite"></section>
+    <section class="panel" aria-labelledby="manage-booking-heading">
+      <h2 id="manage-booking-heading">Find or cancel a booking</h2>
+      <p class="hint">Enter the booking reference from your confirmation and the email used to book.</p>
+      <form id="booking-lookup">
+        <label for="booking-reference">Booking reference</label>
+        <input id="booking-reference" required autocomplete="off">
+        <label for="booking-email">Booking email</label>
+        <input id="booking-email" type="email" required autocomplete="email">
+        <button id="find-booking" type="submit">Find booking</button>
+      </form>
+      <p id="booking-message" role="status" aria-live="polite"></p>
+      <div id="booking-result" hidden>
+        <p id="booking-summary"></p>
+        <button id="cancel-booking" class="danger" type="button">Cancel this booking</button>
+      </div>
+    </section>
   </main>
   <script>
     const keyInput = document.querySelector("#api-key");
     const slotsContainer = document.querySelector("#slots");
     const message = document.querySelector("#message");
     const confirmation = document.querySelector("#confirmation");
+    const bookingLookupForm = document.querySelector("#booking-lookup");
+    const bookingMessage = document.querySelector("#booking-message");
+    const bookingResult = document.querySelector("#booking-result");
+    const bookingSummary = document.querySelector("#booking-summary");
+    const cancelBookingButton = document.querySelector("#cancel-booking");
+    let bookingToCancel = null;
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -161,8 +183,61 @@
       }
     }
 
+    async function findBooking(event) {
+      event.preventDefault();
+      bookingResult.hidden = true;
+      bookingToCancel = null;
+      bookingMessage.textContent = "Looking up your booking…";
+      const bookingId = document.querySelector("#booking-reference").value.trim();
+      const email = document.querySelector("#booking-email").value.trim().toLowerCase();
+      try {
+        const booking = await api(`/bookings/${encodeURIComponent(bookingId)}`);
+        if (booking.email.toLowerCase() !== email) {
+          throw new Error("No booking matches that reference and email.");
+        }
+        bookingToCancel = booking;
+        bookingSummary.textContent =
+          `Booking ${booking.id} for appointment ${booking.slot_id} is ${booking.status}.`;
+        bookingResult.hidden = false;
+        cancelBookingButton.hidden = booking.status !== "confirmed";
+        bookingMessage.textContent = booking.status === "confirmed"
+          ? "Booking found. You can cancel it below."
+          : "This booking has already been cancelled.";
+      } catch (error) {
+        bookingMessage.textContent = error.message === "booking not found"
+          ? "No booking matches that reference and email."
+          : error.message;
+      }
+    }
+
+    async function cancelBooking() {
+      if (!bookingToCancel || bookingToCancel.status !== "confirmed") return;
+      if (!window.confirm("Cancel this appointment? This cannot be undone.")) return;
+
+      cancelBookingButton.disabled = true;
+      bookingMessage.textContent = "Cancelling your booking…";
+      try {
+        const cancelled = await api(
+          `/bookings/${encodeURIComponent(bookingToCancel.id)}`,
+          { method: "DELETE" }
+        );
+        bookingToCancel = cancelled;
+        bookingSummary.textContent =
+          `Booking ${cancelled.id} for appointment ${cancelled.slot_id} is cancelled.`;
+        cancelBookingButton.hidden = true;
+        bookingMessage.textContent = "Your booking is cancelled. The appointment is available again.";
+        await loadSlots();
+      } catch (error) {
+        bookingMessage.textContent = error.message;
+      } finally {
+        cancelBookingButton.disabled = false;
+      }
+    }
+
     document.querySelector("#load-slots").addEventListener("click", loadSlots);
     document.querySelector("#clear-bookings").addEventListener("click", clearBookings);
+    bookingLookupForm.addEventListener("submit", findBooking);
+    cancelBookingButton.addEventListener("click", cancelBooking);
   </script>
 </body>
 </html>
