@@ -8,3 +8,8 @@ booking.db
 .agents/
 .neon
 node_modules/
+package.json
+package-lock.json
+neon.ts
+skills-lock.json
+.vscode/mcp.json
