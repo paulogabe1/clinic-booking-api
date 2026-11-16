@@ -13,28 +13,73 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, Header, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, Response
+import psycopg
+from psycopg.rows import dict_row
 
 #region 1. Database and service startup
 ROOT = Path(__file__).resolve().parent
 DATABASE_PATH = os.environ.get("DATABASE_PATH", str(ROOT / "booking.db"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 STATIC_DIR = ROOT / "static"
 
 app = FastAPI(title="Clinic Booking API", version="1.0.0")
 
 
+class DatabaseConnection:
+    def __init__(self, connection: Any, is_postgres: bool):
+        self.connection = connection
+        self.is_postgres = is_postgres
+
+    def execute(self, query: str, parameters: Any = ()):
+        if self.is_postgres:
+            if query == "BEGIN IMMEDIATE":
+                cursor = self.connection.execute("BEGIN")
+                # Match SQLite's single-writer behavior for booking and rate-limit updates.
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(%s)", (731942681,)
+                )
+                return cursor
+            query = query.replace("?", "%s")
+        return self.connection.execute(query, parameters)
+
+    def executemany(self, query: str, parameters: Any):
+        if self.is_postgres:
+            query = query.replace("?", "%s")
+        return self.connection.executemany(query, parameters)
+
+    def close(self):
+        self.connection.close()
+
+
 @contextmanager
 def database():
-    # Each request gets its own database connection, which is closed afterward.
-    connection = sqlite3.connect(DATABASE_PATH, timeout=30, isolation_level=None)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    if DATABASE_URL:
+        raw_connection = psycopg.connect(
+            DATABASE_URL,
+            autocommit=True,
+            # Psycopg's type annotation currently rejects its documented dict_row factory.
+            row_factory=cast(Any, dict_row),
+        )
+        connection = DatabaseConnection(raw_connection, is_postgres=True)
+    else:
+        # Local development and tests use SQLite unless DATABASE_URL is configured.
+        Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
+        raw_connection = sqlite3.connect(
+            DATABASE_PATH,
+            timeout=30,
+            isolation_level=None,
+        )
+        raw_connection.row_factory = sqlite3.Row
+        raw_connection.execute("PRAGMA foreign_keys = ON")
+        connection = DatabaseConnection(raw_connection, is_postgres=False)
     try:
         yield connection
     finally:
@@ -42,16 +87,17 @@ def database():
 
 
 def initialize_database():
-    Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
     with database() as connection:
-        connection.executescript(
+        schema = [
             """
             CREATE TABLE IF NOT EXISTS slots (
                 id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 start TEXT NOT NULL,
-                end TEXT NOT NULL
-            );
+                "end" TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS bookings (
                 id TEXT PRIMARY KEY,
                 slot_id TEXT NOT NULL REFERENCES slots(id),
@@ -59,29 +105,42 @@ def initialize_database():
                 email TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('confirmed', 'cancelled')),
                 created_at TEXT NOT NULL
-            );
-            -- The database itself rejects a second active booking for a slot.
+            )
+            """,
+            # The database itself rejects a second active booking for a slot.
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS one_confirmed_booking_per_slot
-                ON bookings(slot_id) WHERE status = 'confirmed';
+                ON bookings(slot_id) WHERE status = 'confirmed'
+            """,
+            """
             CREATE INDEX IF NOT EXISTS bookings_by_email_created
-                ON bookings(email, created_at, id);
+                ON bookings(email, created_at, id)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS idempotency (
-                -- Save the result so a retry can receive the original answer.
                 key TEXT PRIMARY KEY,
                 request_hash TEXT NOT NULL,
                 response_status INTEGER NOT NULL,
                 response_body TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS rate_attempts (
-                -- Keep attempts, including failed ones, to limit rapid retries.
-                email TEXT NOT NULL,
-                attempted_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS rate_attempts_by_email_time
-                ON rate_attempts(email, attempted_at);
+            )
+            """,
             """
-        )
-        if connection.execute("SELECT COUNT(*) FROM slots").fetchone()[0] == 0:
+            CREATE TABLE IF NOT EXISTS rate_attempts (
+                email TEXT NOT NULL,
+                attempted_at DOUBLE PRECISION NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS rate_attempts_by_email_time
+                ON rate_attempts(email, attempted_at)
+            """,
+        ]
+        for statement in schema:
+            connection.execute(statement)
+        slot_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM slots"
+        ).fetchone()["count"]
+        if slot_count == 0:
             now = datetime.now(timezone.utc)
             samples = [
                 (
@@ -104,7 +163,8 @@ def initialize_database():
                 ),
             ]
             connection.executemany(
-                "INSERT INTO slots(id, provider, start, end) VALUES (?, ?, ?, ?)",
+                'INSERT INTO slots(id, provider, start, "end") VALUES (?, ?, ?, ?) '
+                "ON CONFLICT(id) DO NOTHING",
                 samples,
             )
 
@@ -171,7 +231,7 @@ def parse_iso(value: Any) -> datetime | None:
         return None
 
 
-def booking_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def booking_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
         "slot_id": row["slot_id"],
@@ -229,7 +289,7 @@ async def reset(request: Request):
         connection.execute("DELETE FROM idempotency")
         connection.execute("DELETE FROM rate_attempts")
         connection.executemany(
-            "INSERT INTO slots(id, provider, start, end) VALUES (?, ?, ?, ?)",
+            'INSERT INTO slots(id, provider, start, "end") VALUES (?, ?, ?, ?)',
             clean_slots,
         )
         connection.execute("COMMIT")
@@ -260,20 +320,21 @@ def clear_bookings(
 @app.get("/slots")
 def list_slots(provider: str | None = None):
     """Show appointments in time order, with whether each can still be booked."""
+    query = """
+        SELECT s.id, s.provider, s.start, s."end",
+               NOT EXISTS (
+                   SELECT 1 FROM bookings b
+                   WHERE b.slot_id = s.id AND b.status = 'confirmed'
+               ) AS available
+        FROM slots s
+    """
+    parameters: tuple[str, ...] = ()
+    if provider is not None:
+        query += " WHERE s.provider = ?"
+        parameters = (provider,)
+    query += " ORDER BY s.start, s.id"
     with database() as connection:
-        rows = connection.execute(
-            """
-            SELECT s.id, s.provider, s.start, s.end,
-                   NOT EXISTS (
-                       SELECT 1 FROM bookings b
-                       WHERE b.slot_id = s.id AND b.status = 'confirmed'
-                   ) AS available
-            FROM slots s
-            WHERE (? IS NULL OR s.provider = ?)
-            ORDER BY s.start, s.id
-            """,
-            (provider, provider),
-        ).fetchall()
+        rows = connection.execute(query, parameters).fetchall()
     return {
         "slots": [
             {
@@ -360,14 +421,14 @@ async def create_booking(
             # Count this email's attempts from the last minute, even failed requests.
             cutoff = now_epoch - 60
             count = connection.execute(
-                "SELECT COUNT(*) FROM rate_attempts WHERE email = ? AND attempted_at > ?",
+                "SELECT COUNT(*) AS attempt_count FROM rate_attempts WHERE email = ? AND attempted_at > ?",
                 (normalized_email, cutoff),
-            ).fetchone()[0]
+            ).fetchone()["attempt_count"]
             if count >= 5:
                 oldest = connection.execute(
-                    "SELECT MIN(attempted_at) FROM rate_attempts WHERE email = ? AND attempted_at > ?",
+                    "SELECT MIN(attempted_at) AS oldest_attempt FROM rate_attempts WHERE email = ? AND attempted_at > ?",
                     (normalized_email, cutoff),
-                ).fetchone()[0]
+                ).fetchone()["oldest_attempt"]
                 retry_after = max(1, int(oldest + 60 - now_epoch + 0.999))
                 connection.execute("COMMIT")
                 return error(

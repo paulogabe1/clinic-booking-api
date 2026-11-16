@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["API_KEY"] = "test-api-key"
 os.environ["ADMIN_KEY"] = "test-admin-key"
+os.environ.pop("DATABASE_URL", None)
 database_directory = tempfile.TemporaryDirectory()
 os.environ["DATABASE_PATH"] = str(Path(database_directory.name) / "test.sqlite3")
 
@@ -54,6 +55,42 @@ class BookingApiTests(unittest.TestCase):
             "/bookings",
             headers=headers,
             json={"slot_id": slot_id, "name": "  Ada Obi  ", "email": email},
+        )
+
+    def test_postgres_connection_translates_queries_and_locks_writes(self):
+        class RecordingConnection:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, query, parameters=()):
+                self.calls.append((query, parameters))
+                return len(self.calls)
+
+            def executemany(self, query, parameters):
+                self.calls.append((query, parameters))
+                return len(self.calls)
+
+        raw_connection = RecordingConnection()
+        connection = main.DatabaseConnection(raw_connection, is_postgres=True)
+
+        self.assertEqual(connection.execute("BEGIN IMMEDIATE"), 1)
+        connection.execute("SELECT id FROM slots WHERE id = ?", ("slot-1",))
+        connection.executemany(
+            "INSERT INTO slots(id, provider) VALUES (?, ?)",
+            [("slot-1", "Dr Ada")],
+        )
+
+        self.assertEqual(
+            raw_connection.calls,
+            [
+                ("BEGIN", ()),
+                ("SELECT pg_advisory_xact_lock(%s)", (731942681,)),
+                ("SELECT id FROM slots WHERE id = %s", ("slot-1",)),
+                (
+                    "INSERT INTO slots(id, provider) VALUES (%s, %s)",
+                    [("slot-1", "Dr Ada")],
+                ),
+            ],
         )
 
     def test_api_key_validation_and_slot_availability(self):
