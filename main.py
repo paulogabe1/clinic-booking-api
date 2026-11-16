@@ -23,9 +23,11 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, Response
 import psycopg
 from psycopg.rows import dict_row
+from dotenv import load_dotenv
 
 #region 1. Database and service startup
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env.local")
 DATABASE_PATH = os.environ.get("DATABASE_PATH", str(ROOT / "booking.db"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 STATIC_DIR = ROOT / "static"
@@ -53,6 +55,9 @@ class DatabaseConnection:
     def executemany(self, query: str, parameters: Any):
         if self.is_postgres:
             query = query.replace("?", "%s")
+            with self.connection.cursor() as cursor:
+                cursor.executemany(query, parameters)
+            return
         return self.connection.executemany(query, parameters)
 
     def close(self):

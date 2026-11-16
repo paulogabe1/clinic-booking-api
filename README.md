@@ -14,8 +14,7 @@ python -m venv .venv
 pip install -r requirements.txt
 $env:API_KEY = "local-development-key"
 $env:ADMIN_KEY = "local-admin-key"
-# Optional: set this to use PostgreSQL instead of the local SQLite file.
-# $env:DATABASE_URL = "postgresql://..."
+# Optional: add DATABASE_URL to the ignored .env.local file to use PostgreSQL.
 python -m uvicorn main:app --reload
 ```
 
@@ -64,7 +63,8 @@ confirmed bookings. A new booking can also be cancelled from its confirmation.
   in one minute. Failed attempts count too.
 - **Saved data:** appointments, bookings, and retry information are stored in
   SQLite for local development. If `DATABASE_URL` is set, the app uses
-  PostgreSQL instead.
+  PostgreSQL instead. The app reads local database settings from `.env.local`;
+  environment variables already set by the host take precedence.
 
 ## Deploy to Render
 

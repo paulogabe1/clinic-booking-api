@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["API_KEY"] = "test-api-key"
 os.environ["ADMIN_KEY"] = "test-admin-key"
-os.environ.pop("DATABASE_URL", None)
+os.environ["DATABASE_URL"] = ""
 database_directory = tempfile.TemporaryDirectory()
 os.environ["DATABASE_PATH"] = str(Path(database_directory.name) / "test.sqlite3")
 
@@ -66,9 +66,21 @@ class BookingApiTests(unittest.TestCase):
                 self.calls.append((query, parameters))
                 return len(self.calls)
 
+            def cursor(self):
+                return RecordingCursor(self)
+
+        class RecordingCursor:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
             def executemany(self, query, parameters):
-                self.calls.append((query, parameters))
-                return len(self.calls)
+                self.connection.calls.append((query, parameters))
 
         raw_connection = RecordingConnection()
         connection = main.DatabaseConnection(raw_connection, is_postgres=True)
