@@ -14,7 +14,7 @@ python -m venv .venv
 pip install -r requirements.txt
 $env:API_KEY = "local-development-key"
 $env:ADMIN_KEY = "local-admin-key"
-# Optional: add DATABASE_URL to the ignored .env.local file to use PostgreSQL.
+# The app reads DATABASE_URL from the ignored .env.local file if present.
 python -m uvicorn main:app --reload
 ```
 
@@ -62,19 +62,22 @@ confirmed bookings. A new booking can also be cancelled from its confirmation.
 - **Booking limits:** each email address can make up to five booking attempts
   in one minute. Failed attempts count too.
 - **Saved data:** appointments, bookings, and retry information are stored in
-  SQLite for local development. If `DATABASE_URL` is set, the app uses
-  PostgreSQL instead. The app reads local database settings from `.env.local`;
-  environment variables already set by the host take precedence.
+  PostgreSQL when `DATABASE_URL` is available; otherwise local development
+  falls back to SQLite. The app loads local settings from `.env.local`, while
+  environment variables already set by the host take precedence. Keep
+  `.env.local` private and never commit or share its connection strings.
 
 ## Deploy to Render
 
 The `render.yaml` file describes the service for Render. Render can create the
-`API_KEY` and `ADMIN_KEY` for you. For restart-safe booking data, create a
-PostgreSQL database (for example, on Neon), copy its connection URL, then add
-it as `DATABASE_URL` in the Render service's Environment settings and redeploy.
-The app uses that database whenever `DATABASE_URL` is set; otherwise it falls
-back to SQLite. Keep the database URL private. Enter the API key on the website
-to use it; the clear bookings button will ask for the admin key when needed.
+`API_KEY` and `ADMIN_KEY` for you. This app uses Neon PostgreSQL for persistent
+booking data. In Render's service **Environment** settings, set `DATABASE_URL`
+to the pooled connection string from your Neon project (the `DATABASE_URL`
+entry, not `DATABASE_URL_UNPOOLED`), then save and redeploy. The app reads that
+host setting in production; locally it reads the same variable from
+`.env.local`. Keep both connection strings private and out of GitHub. Enter
+the API key on the website to use it; the clear bookings button will ask for
+the admin key when needed.
 
 The API key is a shared password, not a separate login for each patient. Keep
 it private. Before using this with real patients, replace the shared key with
