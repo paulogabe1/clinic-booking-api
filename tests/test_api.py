@@ -106,6 +106,14 @@ class BookingApiTests(unittest.TestCase):
         )
 
     def test_api_key_validation_and_slot_availability(self):
+        for path in ("/docs", "/openapi.json", "/redoc"):
+            self.assertEqual(self.client.get(path).status_code, 200)
+
+        schema = self.client.get("/openapi.json").json()
+        self.assertEqual(
+            schema["components"]["securitySchemes"]["ApiKeyAuth"]["name"],
+            "X-API-Key",
+        )
         self.assertEqual(self.client.get("/slots").status_code, 401)
         response = self.client.get("/slots", headers=self.headers)
         self.assertEqual(response.status_code, 200)

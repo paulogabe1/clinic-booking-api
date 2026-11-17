@@ -215,8 +215,12 @@ app.openapi = custom_openapi
 
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
-    # Let people open the web page, but require the key for API routes.
-    if request.url.path != "/" and not request.url.path.startswith("/static/"):
+    public_paths = {"/", "/docs", "/openapi.json", "/redoc"}
+    is_public_path = (
+        request.url.path in public_paths
+        or request.url.path.startswith("/static/")
+    )
+    if not is_public_path:
         if not api_key_valid(request.headers.get("X-API-Key")):
             return error("invalid or missing API key", 401)
     return await call_next(request)
